@@ -1,3 +1,8 @@
+import os
+import sqlite3
+
+if not os.path.exists("inventory.db"):
+    import setup_db
 import streamlit as st
 import pandas as pd
 import plotly.express as px
