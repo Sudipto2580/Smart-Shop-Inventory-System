@@ -1,15 +1,30 @@
 from ultralytics import YOLO
 import cv2
-
+import time
 from database import get_connection
 from allocation import assign_shelf
 
+last_saved = None
+last_saved_time = 0
+
+# ==========================
+# LOAD YOLO MODEL
+# ==========================
+
 model = YOLO("yolov8n.pt")
+
+# ==========================
+# CAMERA
+# ==========================
 
 camera = cv2.VideoCapture(0)
 
 last_detected = None
 locked_object = None
+
+# ==========================
+# MAIN LOOP
+# ==========================
 
 while True:
 
@@ -20,23 +35,39 @@ while True:
 
     results = model(frame)
 
+    # ==========================
+    # DETECT OBJECTS
+    # ==========================
+
+    best_object = None
+    best_confidence = 0
+
     for result in results:
 
         for box in result.boxes:
 
-            class_id = int(box.cls[0])
-
-            name = model.names[class_id]
-
             confidence = float(box.conf[0])
 
-            if confidence > 0.60:
+            if confidence > best_confidence:
 
-                last_detected = name
+                class_id = int(box.cls[0])
+
+                best_object = model.names[class_id]
+                if model.names[class_id] == "person":
+                    continue
+
+                best_confidence = confidence
+
+    if best_object and best_confidence > 0.60:
+
+        last_detected = best_object
 
     annotated_frame = results[0].plot()
 
-    # Show currently locked object on screen
+    # ==========================
+    # SHOW LOCKED OBJECT
+    # ==========================
+
     if locked_object:
 
         cv2.putText(
@@ -50,7 +81,7 @@ while True:
         )
 
     cv2.imshow(
-        "Scan Product",
+        "Smart Inventory Scanner",
         annotated_frame
     )
 
@@ -67,25 +98,47 @@ while True:
             locked_object = last_detected
 
             print(
-                f"LOCKED: {locked_object}"
+                f"\nLOCKED OBJECT: {locked_object}"
             )
 
     # ==========================
-    # S = SAVE LOCKED OBJECT
+    # S = SAVE TO DATABASE
     # ==========================
 
     if key == ord("s"):
 
-        if locked_object:
+        if not locked_object:
+            current_time = time.time()
+
+            if (
+                locked_object == last_saved
+                and
+                current_time - last_saved_time < 5
+                ):
+                print("Duplicate scan ignored")
+            continue
+
+            print(
+                "\nNo object locked. Press L first."
+            )
+
+        else:
 
             conn = get_connection()
             cursor = conn.cursor()
 
+            # ==========================
+            # FIND PRODUCT USING YOLO MAP
+            # ==========================
+
             cursor.execute("""
-            SELECT product_id,
-                   weight
-            FROM products
-            WHERE LOWER(product_name)=?
+            SELECT
+            p.product_id,
+            p.weight
+            FROM yolo_product_mapping y
+            JOIN products p
+            ON y.product_id = p.product_id
+            WHERE LOWER(y.yolo_name)=%s
             """,
             (
                 locked_object.lower(),
@@ -93,45 +146,117 @@ while True:
 
             product = cursor.fetchone()
 
-            if product:
+            if not product:
+
+                print(
+                    f"\n{locked_object} not mapped to any product."
+                )
+
+                conn.close()
+
+            else:
 
                 product_id = product[0]
                 weight = product[1]
+
+                # ==========================
+                # ASSIGN SHELF
+                # ==========================
 
                 shelf_id, shelf_name = assign_shelf(
                     weight
                 )
 
-                if shelf_id:
+                if not shelf_id:
+
+                    print(
+                        "\nNo shelf available."
+                    )
+
+                    conn.close()
+
+                else:
+
+                    # ==========================
+                    # CHECK EXISTING INVENTORY
+                    # ==========================
 
                     cursor.execute("""
-                    INSERT INTO inventory
-                    (
-                    product_id,
-                    shelf_id,
-                    quantity,
-                    total_weight
-                    )
-                    VALUES
-                    (?, ?, ?, ?)
+                    SELECT
+                        inventory_id,
+                        quantity,
+                        total_weight
+                    FROM inventory
+                    WHERE product_id=%s
+                    AND shelf_id=%s
                     """,
                     (
                         product_id,
-                        shelf_id,
-                        1,
-                        weight
+                        shelf_id
                     ))
+
+                    existing = cursor.fetchone()
+
+                    # ==========================
+                    # UPDATE INVENTORY
+                    # ==========================
+
+                    if existing:
+
+                        inventory_id = existing[0]
+
+                        old_qty = existing[1]
+
+                        old_weight = existing[2]
+
+                        cursor.execute("""
+                        UPDATE inventory
+                        SET quantity=%s,
+                            total_weight=%s
+                        WHERE inventory_id=%s   
+                        """,
+                        (
+                            old_qty + 1,
+                            old_weight + weight,
+                            inventory_id
+                        ))
+
+                    else:
+
+                        cursor.execute("""
+                        INSERT INTO inventory
+                        (
+                            product_id,
+                            shelf_id,
+                            quantity,
+                            total_weight
+                        )
+                        VALUES
+                        (%s, %s, %s, %s)
+                        """,
+                        (
+                            product_id,
+                            shelf_id,
+                            1,
+                            weight
+                        ))
+
+                  
+
+                    # ==========================
+                    # TRANSACTION LOG
+                    # ==========================
 
                     cursor.execute("""
                     INSERT INTO transactions
                     (
-                    product_id,
-                    action,
-                    quantity,
-                    shelf_id
+                        product_id,
+                        action,
+                        quantity,
+                        shelf_id
                     )
                     VALUES
-                    (?, ?, ?, ?)
+                    (%s, %s, %s, %s)
                     """,
                     (
                         product_id,
@@ -140,45 +265,41 @@ while True:
                         shelf_id
                     ))
 
+                    # ==========================
+                    # MOVEMENT HISTORY
+                    # ==========================
+
                     cursor.execute("""
-                    UPDATE shelves
-                    SET used_capacity =
-                    used_capacity + ?
-                    WHERE shelf_id = ?
+                    INSERT INTO product_location_history
+                    (
+                        product_id,
+                        shelf_id,
+                        quantity
+                    )
+                    VALUES
+                    (%s, %s, %s)
                     """,
                     (
-                        weight,
-                        shelf_id
+                        product_id,
+                        shelf_id,
+                        1
                     ))
 
                     conn.commit()
-
+                    last_saved = locked_object
+                    last_saved_time = time.time()
+                    locked_object = None
                     print(
-                        f"{locked_object} stored in {shelf_name}"
+                        f"\nSUCCESS: {locked_object}"
                     )
 
-                    # Reset lock after saving
+                    print(
+                        f"Stored in Shelf: {shelf_name}"
+                    )
+
                     locked_object = None
 
-                else:
-
-                    print(
-                        "No shelf available"
-                    )
-
-            else:
-
-                print(
-                    f"{locked_object} not found in Product Master"
-                )
-
-            conn.close()
-
-        else:
-
-            print(
-                "No object locked. Press L first."
-            )
+                    conn.close()
 
     # ==========================
     # ESC = EXIT
@@ -186,6 +307,7 @@ while True:
 
     if key == 27:
         break
+
 
 camera.release()
 cv2.destroyAllWindows()

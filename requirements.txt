@@ -1,6 +1,7 @@
-streamlit==1.45.1
-pandas
+streamlit
+psycopg2-binary
+python-dotenv
 plotly
-numpy
-opencv-python-headless
+streamlit-autorefresh
 ultralytics
+opencv-python

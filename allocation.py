@@ -32,8 +32,8 @@ def assign_shelf(total_weight):
 
             cursor.execute("""
             UPDATE shelves
-            SET used_capacity=?
-            WHERE shelf_id=?
+            SET used_capacity=%s
+            WHERE shelf_id=%s
             """,
             (
                 new_used,
@@ -42,10 +42,12 @@ def assign_shelf(total_weight):
 
             conn.commit()
 
+            cursor.close()
             conn.close()
 
             return shelf_id, shelf_name
 
+    cursor.close()
     conn.close()
 
     return None, None

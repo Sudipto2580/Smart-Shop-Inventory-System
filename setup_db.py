@@ -7,6 +7,8 @@ cursor = conn.cursor()
 # DROP OLD TABLES
 # ==========================
 
+cursor.execute("DROP TABLE IF EXISTS stock_alerts")
+cursor.execute("DROP TABLE IF EXISTS product_location_history")
 cursor.execute("DROP TABLE IF EXISTS yolo_product_mapping")
 cursor.execute("DROP TABLE IF EXISTS shelf_allocation_log")
 cursor.execute("DROP TABLE IF EXISTS transactions")
@@ -38,6 +40,7 @@ CREATE TABLE products (
     weight REAL,
     volume REAL,
     barcode TEXT UNIQUE,
+    image_path TEXT,
     FOREIGN KEY(category_id)
     REFERENCES categories(category_id)
 )
@@ -75,8 +78,7 @@ CREATE TABLE inventory (
     REFERENCES shelves(shelf_id)
 )
 """)
-
-# ==========================
+#===========================
 # TRANSACTIONS
 # ==========================
 
@@ -103,10 +105,28 @@ CREATE TABLE shelf_allocation_log (
     assigned_time DATETIME DEFAULT CURRENT_TIMESTAMP
 )
 """)
+
+cursor.execute("""
+CREATE TABLE product_location_history
+(
+    history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER,
+    shelf_id INTEGER,
+    quantity INTEGER,
+    moved_at DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+""")
+cursor.execute("""
+CREATE TABLE stock_alerts
+(
+    alert_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER,
+    minimum_stock INTEGER
+)
+""")
 # ==========================
 # YOLO PRODUCT MAPPING
 # ==========================
-
 cursor.execute("""
 CREATE TABLE yolo_product_mapping (
     yolo_name TEXT PRIMARY KEY,
@@ -142,9 +162,7 @@ cursor.executemany(
     "INSERT INTO categories(category_name) VALUES(?)",
     categories
 )
-#=========================================================
-#PRODUCT MAPPING
-#=========================================================
+
 
 # ==========================
 # INSERT 16 SHELVES
@@ -183,6 +201,13 @@ location_column
 )
 VALUES(?,?,?,?,?)
 """, shelves)
+
+
+cursor.execute("SELECT COUNT(*) FROM categories")
+print("Categories:", cursor.fetchone()[0])
+
+cursor.execute("SELECT COUNT(*) FROM shelves")
+print("Shelves:", cursor.fetchone()[0])
 
 conn.commit()
 conn.close()
